@@ -1,0 +1,2022 @@
+                                       
+-- SECURE STUDENT RECORDS MANAGEMENT SYSTEM
+-- PART A: COMPLETE DATABASE SECURITY IMPLEMENTATION (FIXED)
+-- =============================================
+
+USE master;
+GO
+
+-- Drop database if exists
+IF EXISTS (SELECT name FROM sys.databases WHERE name = 'SecureStudentDB')
+BEGIN
+    ALTER DATABASE SecureStudentDB SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+    DROP DATABASE SecureStudentDB;
+END
+GO
+
+-- Create Database
+CREATE DATABASE SecureStudentDB;
+GO
+
+USE SecureStudentDB;
+GO
+
+-- =============================================
+-- STEP 1: CREATE ENCRYPTION KEYS
+-- =============================================
+
+-- Create Master Key
+CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongMasterKey@2024!';
+GO
+
+-- Create Certificate for Encryption
+CREATE CERTIFICATE StudentDataCert
+WITH SUBJECT = 'Certificate for Student Data Encryption';
+GO
+
+-- Create Symmetric Key for AES Encryption
+CREATE SYMMETRIC KEY StudentDataKey
+WITH ALGORITHM = AES_256
+ENCRYPTION BY CERTIFICATE StudentDataCert;
+GO
+
+-- =============================================
+-- STEP 2: CREATE BASE TABLES
+-- =============================================
+
+-- 2.1 USERS Table (Authentication)
+CREATE TABLE USERS (
+    UserID INT IDENTITY(1,1) PRIMARY KEY,
+    Username NVARCHAR(50) NOT NULL UNIQUE,
+    PasswordHash VARBINARY(64) NOT NULL,
+    Role NVARCHAR(20) NOT NULL CHECK (Role IN ('Admin', 'Instructor', 'TA', 'Student', 'Guest')),
+    ClearanceLevel INT NOT NULL CHECK (ClearanceLevel BETWEEN 0 AND 4),
+    IsActive BIT DEFAULT 1,
+    CreatedDate DATETIME DEFAULT GETDATE(),
+    LastLogin DATETIME NULL
+);
+GO
+
+-- Clearance Levels:
+-- 0 = Unclassified (Guest)
+-- 1 = Confidential (Student)
+-- 2 = Secret (TA)
+-- 3 = Top Secret (Instructor)
+-- 4 = Top Secret+ (Admin)
+
+-- 2.2 STUDENT Table (Confidential)
+CREATE TABLE STUDENT (
+    StudentID INT IDENTITY(1,1) PRIMARY KEY,
+    StudentID_Encrypted VARBINARY(256) NOT NULL,
+    FullName NVARCHAR(100) NOT NULL,
+    Email NVARCHAR(100) NOT NULL,
+    Phone_Encrypted VARBINARY(256) NULL,
+    DOB DATE NOT NULL,
+    Department NVARCHAR(50) NOT NULL,
+    ClearanceLevel INT DEFAULT 1,
+    UserID INT NULL,
+    ClassificationLevel INT DEFAULT 1,
+    FOREIGN KEY (UserID) REFERENCES USERS(UserID)
+);
+GO
+
+-- 2.3 INSTRUCTOR Table (Confidential)
+CREATE TABLE INSTRUCTOR (
+    InstructorID INT IDENTITY(1,1) PRIMARY KEY,
+    FullName NVARCHAR(100) NOT NULL,
+    Email NVARCHAR(100) NOT NULL,
+    ClearanceLevel INT DEFAULT 3,
+    UserID INT NULL,
+    ClassificationLevel INT DEFAULT 1,
+    FOREIGN KEY (UserID) REFERENCES USERS(UserID)
+);
+GO
+
+-- 2.4 COURSE Table (Unclassified)
+CREATE TABLE COURSE (
+    CourseID INT IDENTITY(1,1) PRIMARY KEY,
+    CourseName NVARCHAR(100) NOT NULL,
+    Description NVARCHAR(MAX) NULL,
+    PublicInfo NVARCHAR(MAX) NULL,
+    InstructorID INT NULL,
+    ClassificationLevel INT DEFAULT 0,
+    FOREIGN KEY (InstructorID) REFERENCES INSTRUCTOR(InstructorID)
+);
+GO
+
+-- 2.5 GRADES Table (Secret)
+CREATE TABLE GRADES (
+    GradeID INT IDENTITY(1,1) PRIMARY KEY,
+    StudentID_Encrypted VARBINARY(256) NOT NULL,
+    CourseID INT NOT NULL,
+    GradeValue_Encrypted VARBINARY(256) NOT NULL,
+    DateEntered DATETIME DEFAULT GETDATE(),
+    EnteredBy INT NOT NULL,
+    ClassificationLevel INT DEFAULT 2,
+    FOREIGN KEY (CourseID) REFERENCES COURSE(CourseID)
+);
+GO
+
+-- 2.6 ATTENDANCE Table (Secret)
+CREATE TABLE ATTENDANCE (
+    AttendanceID INT IDENTITY(1,1) PRIMARY KEY,
+    StudentID INT NOT NULL,
+    CourseID INT NOT NULL,
+    Status BIT NOT NULL,
+    DateRecorded DATETIME DEFAULT GETDATE(),
+    RecordedBy INT NOT NULL,
+    ClassificationLevel INT DEFAULT 2,
+    FOREIGN KEY (StudentID) REFERENCES STUDENT(StudentID),
+    FOREIGN KEY (CourseID) REFERENCES COURSE(CourseID)
+);
+GO
+
+-- 2.7 TA_ASSIGNMENTS Table
+CREATE TABLE TA_ASSIGNMENTS (
+    AssignmentID INT IDENTITY(1,1) PRIMARY KEY,
+    UserID INT NOT NULL,
+    CourseID INT NOT NULL,
+    AssignedDate DATETIME DEFAULT GETDATE(),
+    FOREIGN KEY (UserID) REFERENCES USERS(UserID),
+    FOREIGN KEY (CourseID) REFERENCES COURSE(CourseID)
+);
+GO
+
+-- 2.8 AUDIT_LOG Table
+CREATE TABLE AUDIT_LOG (
+    LogID INT IDENTITY(1,1) PRIMARY KEY,
+    UserID INT NOT NULL,
+    Action NVARCHAR(100) NOT NULL,
+    TableName NVARCHAR(50) NULL,
+    RecordID INT NULL,
+    OldValue NVARCHAR(MAX) NULL,
+    NewValue NVARCHAR(MAX) NULL,
+    Timestamp DATETIME DEFAULT GETDATE(),
+    IPAddress NVARCHAR(50) NULL,
+    Success BIT DEFAULT 1
+);
+GO
+
+-- =============================================
+-- STEP 3: CREATE SQL SERVER ROLES (RBAC)
+-- =============================================
+
+CREATE ROLE AdminRole;
+CREATE ROLE InstructorRole;
+CREATE ROLE TARole;
+CREATE ROLE StudentRole;
+CREATE ROLE GuestRole;
+GO
+
+-- =============================================
+-- STEP 4: GRANT PERMISSIONS TO ROLES
+-- =============================================
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON USERS TO AdminRole;
+GRANT SELECT, INSERT, UPDATE, DELETE ON STUDENT TO AdminRole;
+GRANT SELECT, INSERT, UPDATE, DELETE ON INSTRUCTOR TO AdminRole;
+GRANT SELECT, INSERT, UPDATE, DELETE ON COURSE TO AdminRole;
+GRANT SELECT, INSERT, UPDATE, DELETE ON GRADES TO AdminRole;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ATTENDANCE TO AdminRole;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TA_ASSIGNMENTS TO AdminRole;
+GRANT SELECT ON AUDIT_LOG TO AdminRole;
+
+GRANT SELECT ON STUDENT TO InstructorRole;
+GRANT SELECT ON COURSE TO InstructorRole;
+GRANT SELECT, INSERT, UPDATE ON GRADES TO InstructorRole;
+GRANT SELECT, INSERT, UPDATE ON ATTENDANCE TO InstructorRole;
+
+GRANT SELECT ON STUDENT TO TARole;
+GRANT SELECT ON COURSE TO TARole;
+GRANT SELECT ON GRADES TO TARole;
+GRANT SELECT, INSERT, UPDATE ON ATTENDANCE TO TARole;
+
+GRANT SELECT ON COURSE TO StudentRole;
+GRANT SELECT ON COURSE TO GuestRole;
+GO
+
+-- =============================================
+-- STEP 5: HELPER FUNCTIONS
+-- =============================================
+
+---Pass hashing func1---
+
+CREATE FUNCTION dbo.HashPassword(@Password NVARCHAR(100))
+RETURNS VARBINARY(64)
+AS
+BEGIN
+    RETURN HASHBYTES('SHA2_512', @Password);
+END
+GO
+
+-- Clearance check function 2--
+CREATE FUNCTION dbo.CheckClearance(@UserClearance INT, @DataClearance INT)
+RETURNS BIT
+AS
+BEGIN
+    IF @UserClearance >= @DataClearance
+        RETURN 1;
+    RETURN 0;
+END
+GO
+
+-- =============================================
+-- STEP 6: ENCRYPTION HELPER PROCEDURES
+-- =============================================
+
+CREATE PROCEDURE sp_EncryptData
+    @PlainText NVARCHAR(MAX),
+    @EncryptedData VARBINARY(256) OUTPUT
+AS
+BEGIN
+    OPEN SYMMETRIC KEY StudentDataKey
+    DECRYPTION BY CERTIFICATE StudentDataCert;
+    
+    SET @EncryptedData = ENCRYPTBYKEY(KEY_GUID('StudentDataKey'), @PlainText);
+    
+    CLOSE SYMMETRIC KEY StudentDataKey;
+END
+GO
+---Decrypt Data Procedure--
+
+CREATE PROCEDURE sp_DecryptData
+    @EncryptedData VARBINARY(256),
+    @PlainText NVARCHAR(MAX) OUTPUT
+AS
+BEGIN
+    OPEN SYMMETRIC KEY StudentDataKey
+    DECRYPTION BY CERTIFICATE StudentDataCert;
+    
+    SET @PlainText = CONVERT(NVARCHAR(MAX), DECRYPTBYKEY(@EncryptedData));
+    
+    CLOSE SYMMETRIC KEY StudentDataKey;
+END
+GO
+
+-- =============================================
+-- STEP 7: AUTHENTICATION PROCEDURES
+-- =============================================
+
+CREATE PROCEDURE sp_RegisterUser
+    @Username NVARCHAR(50),
+    @Password NVARCHAR(100),
+    @Role NVARCHAR(20),
+    @ClearanceLevel INT,
+    @UserID INT OUTPUT,
+    @Result INT OUTPUT,
+    @Message NVARCHAR(200) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        IF EXISTS (SELECT 1 FROM USERS WHERE Username = @Username)
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Username already exists';
+            SET @UserID = NULL;
+            RETURN;
+        END
+
+        DECLARE @PasswordHash VARBINARY(64);
+        SET @PasswordHash = dbo.HashPassword(@Password);
+
+        INSERT INTO USERS (Username, PasswordHash, Role, ClearanceLevel)
+        VALUES (@Username, @PasswordHash, @Role, @ClearanceLevel);
+
+        SET @UserID = SCOPE_IDENTITY();
+        SET @Result = 1;
+        SET @Message = 'User registered successfully';
+    END TRY
+    BEGIN CATCH
+        SET @Result = 0;
+        SET @Message = ERROR_MESSAGE();
+        SET @UserID = NULL;
+    END CATCH
+END
+GO
+
+CREATE PROCEDURE sp_Login
+    @Username NVARCHAR(50),
+    @Password NVARCHAR(100),
+    @UserID INT OUTPUT,
+    @Role NVARCHAR(20) OUTPUT,
+    @ClearanceLevel INT OUTPUT,
+    @Success BIT OUTPUT,
+    @Message NVARCHAR(200) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    DECLARE @StoredHash VARBINARY(64);
+    DECLARE @InputHash VARBINARY(64);
+    
+    SELECT @StoredHash = PasswordHash,
+           @UserID = UserID,
+           @Role = Role,
+           @ClearanceLevel = ClearanceLevel
+    FROM USERS
+    WHERE Username = @Username AND IsActive = 1;
+    
+    IF @StoredHash IS NULL
+    BEGIN
+        SET @Success = 0;
+        SET @Message = 'Invalid username or password';
+        RETURN;
+    END
+    
+    SET @InputHash = dbo.HashPassword(@Password);
+    
+    IF @InputHash = @StoredHash
+    BEGIN
+        UPDATE USERS SET LastLogin = GETDATE() WHERE UserID = @UserID;
+        INSERT INTO AUDIT_LOG (UserID, Action, Success) VALUES (@UserID, 'LOGIN', 1);
+        SET @Success = 1;
+        SET @Message = 'Login successful';
+    END
+    ELSE
+    BEGIN
+        INSERT INTO AUDIT_LOG (UserID, Action, Success) VALUES (ISNULL(@UserID, 0), 'LOGIN_FAILED', 0);
+        SET @Success = 0;
+        SET @Message = 'Invalid username or password';
+    END
+END
+GO
+
+-- =============================================
+-- STEP 8: MULTILEVEL SECURITY (MLS) VIEWS
+-- =============================================
+--First view--
+CREATE VIEW vw_UnclassifiedCourses
+AS
+SELECT CourseID, CourseName, PublicInfo
+FROM COURSE
+WHERE ClassificationLevel = 0;
+GO
+--Second view--
+CREATE VIEW vw_ConfidentialStudentData
+AS
+SELECT s.StudentID, s.FullName, s.Email, s.Department
+FROM STUDENT s
+WHERE s.ClassificationLevel <= 1;
+GO
+--Third view--
+CREATE VIEW vw_SecretGradeData
+AS
+SELECT g.GradeID, g.CourseID, g.DateEntered
+FROM GRADES g
+WHERE g.ClassificationLevel <= 2;
+GO
+
+-- =============================================
+-- STEP 9: INFERENCE CONTROL
+-- =============================================
+
+CREATE PROCEDURE sp_GetAggregateGrades
+    @CourseID INT,
+    @UserClearance INT,
+    @Result NVARCHAR(MAX) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @Count INT;
+    
+    IF @UserClearance < 2
+    BEGIN
+        SET @Result = 'Access Denied: Insufficient clearance level';
+        RETURN;
+    END
+    
+    SELECT @Count = COUNT(*) FROM GRADES WHERE CourseID = @CourseID;
+    
+    IF @Count < 3
+    BEGIN
+        SET @Result = 'Query blocked: Result set too small (Inference Control - Min 3 records required)';
+        RETURN;
+    END
+    
+    OPEN SYMMETRIC KEY StudentDataKey DECRYPTION BY CERTIFICATE StudentDataCert;
+    
+    DECLARE @AvgGrade DECIMAL(5,2);
+    SELECT @AvgGrade = AVG(CAST(CONVERT(NVARCHAR(10), DECRYPTBYKEY(GradeValue_Encrypted)) AS DECIMAL(5,2)))
+    FROM GRADES WHERE CourseID = @CourseID;
+    
+    CLOSE SYMMETRIC KEY StudentDataKey;
+    
+    SET @Result = 'Average Grade: ' + CAST(@AvgGrade AS NVARCHAR(10)) + ', Count: ' + CAST(@Count AS NVARCHAR(10));
+END
+GO
+
+-- =============================================
+-- STEP 10: FLOW CONTROL
+-- =============================================
+
+CREATE TRIGGER trg_PreventDownFlow
+ON GRADES
+INSTEAD OF INSERT, UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    DECLARE @UserClearance INT = 3;
+    DECLARE @DataClassification INT = 2;
+    
+    IF @UserClearance > @DataClassification
+    BEGIN
+        RAISERROR('Flow Control Violation: Cannot write down to lower classification level', 16, 1);
+        ROLLBACK TRANSACTION;
+        RETURN;
+    END
+    
+    IF EXISTS (SELECT 1 FROM inserted)
+    BEGIN
+        INSERT INTO GRADES (StudentID_Encrypted, CourseID, GradeValue_Encrypted, EnteredBy, ClassificationLevel)
+        SELECT StudentID_Encrypted, CourseID, GradeValue_Encrypted, EnteredBy, ClassificationLevel
+        FROM inserted;
+    END
+END
+GO
+
+-- =============================================
+-- STEP 11: STUDENT MANAGEMENT PROCEDURES (FIXED VERSION)
+-- =============================================
+
+USE SecureStudentDB;
+GO
+-- PART 1: CHECK AND DROP EXISTING PROCEDURES
+
+-- First, check if sp_AddStudent already exists from previous steps
+IF OBJECT_ID('sp_AddStudent', 'P') IS NOT NULL
+BEGIN
+    PRINT 'Dropping existing sp_AddStudent...';
+    DROP PROCEDURE sp_AddStudent;
+END
+GO
+
+IF OBJECT_ID('sp_RegisterUser', 'P') IS NOT NULL
+BEGIN
+    PRINT 'Dropping existing sp_RegisterUser...';
+    DROP PROCEDURE sp_RegisterUser;
+END
+GO
+
+-- Drop other procedures if they exist
+IF OBJECT_ID('sp_ViewOwnProfile', 'P') IS NOT NULL
+    DROP PROCEDURE sp_ViewOwnProfile;
+GO
+
+IF OBJECT_ID('sp_EditOwnProfile', 'P') IS NOT NULL
+    DROP PROCEDURE sp_EditOwnProfile;
+GO
+
+IF OBJECT_ID('sp_ViewAllStudents', 'P') IS NOT NULL
+    DROP PROCEDURE sp_ViewAllStudents;
+GO
+
+-- PART 2: CREATE OR RE-CREATE sp_RegisterUser
+
+CREATE PROCEDURE sp_RegisterUser
+    @Username NVARCHAR(50),
+    @Password NVARCHAR(100),
+    @Role NVARCHAR(20),
+    @ClearanceLevel INT,
+    @UserID INT OUTPUT,  -- This parameter was missing in your second declaration
+    @Result INT OUTPUT,
+    @Message NVARCHAR(200) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        -- Check if username exists
+        IF EXISTS (SELECT 1 FROM USERS WHERE Username = @Username)
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Username already exists';
+            SET @UserID = NULL;
+            RETURN;
+        END
+
+        -- Hash password
+        DECLARE @PasswordHash VARBINARY(64);
+        SET @PasswordHash = dbo.HashPassword(@Password);
+
+        -- Insert user
+        INSERT INTO USERS (Username, PasswordHash, Role, ClearanceLevel)
+        VALUES (@Username, @PasswordHash, @Role, @ClearanceLevel);
+
+        -- Get the newly created UserID
+        SET @UserID = SCOPE_IDENTITY();
+        SET @Result = 1;
+        SET @Message = 'User registered successfully';
+        
+        -- Audit log
+        INSERT INTO AUDIT_LOG (UserID, Action, TableName, RecordID, Success)
+        VALUES (@UserID, 'USER_REGISTER', 'USERS', @UserID, 1);
+    END TRY
+    BEGIN CATCH
+        SET @Result = 0;
+        SET @Message = ERROR_MESSAGE();
+        SET @UserID = NULL;
+        
+        -- Audit log for failure
+        INSERT INTO AUDIT_LOG (UserID, Action, TableName, Success)
+        VALUES (NULL, 'USER_REGISTER_FAILED', 'USERS', 0);
+    END CATCH
+END
+GO
+-- PART 3: CREATE sp_AddStudent (SIMPLIFIED)
+
+CREATE PROCEDURE sp_AddStudent
+    @FullName NVARCHAR(100),
+    @Email NVARCHAR(100),
+    @Phone NVARCHAR(20),
+    @DOB DATE,
+    @Department NVARCHAR(50),
+    @Username NVARCHAR(50),
+    @Password NVARCHAR(100),
+    @ExecutorClearance INT,
+    @Result INT OUTPUT,
+    @Message NVARCHAR(200) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        -- Access Control: Check clearance (Admin = 4)
+        IF @ExecutorClearance < 4
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Access Denied: Admin privileges required';
+            RETURN;
+        END
+
+        -- Step 1: Register the user first
+        DECLARE @UserID INT;
+        DECLARE @RegResult INT;
+        DECLARE @RegMessage NVARCHAR(200);
+        
+        -- Register user (now all parameters match)
+        EXEC sp_RegisterUser 
+            @Username = @Username,
+            @Password = @Password,
+            @Role = 'Student',
+            @ClearanceLevel = 1,
+            @UserID = @UserID OUTPUT,
+            @Result = @RegResult OUTPUT,
+            @Message = @RegMessage OUTPUT;
+        
+        -- Check if user creation failed
+        IF @RegResult = 0 OR @UserID IS NULL
+        BEGIN
+            SET @Result = 0;
+            SET @Message = @RegMessage;
+            RETURN;
+        END
+        
+        -- Step 2: Encrypt sensitive data
+        DECLARE @StudentID_Enc VARBINARY(256);
+        DECLARE @Phone_Enc VARBINARY(256);
+        
+        -- Open key for encryption
+        OPEN SYMMETRIC KEY StudentDataKey
+        DECRYPTION BY CERTIFICATE StudentDataCert;
+        
+        -- Encrypt StudentID (using UserID as reference)
+        SET @StudentID_Enc = ENCRYPTBYKEY(KEY_GUID('StudentDataKey'), CAST(@UserID AS NVARCHAR(50)));
+        
+        -- Encrypt Phone
+        SET @Phone_Enc = ENCRYPTBYKEY(KEY_GUID('StudentDataKey'), @Phone);
+        
+        CLOSE SYMMETRIC KEY StudentDataKey;
+        
+        -- Step 3: Insert student record
+        INSERT INTO STUDENT (
+            StudentID_Encrypted, 
+            FullName, 
+            Email, 
+            Phone_Encrypted, 
+            DOB, 
+            Department, 
+            UserID,
+            ClassificationLevel
+        )
+        VALUES (
+            @StudentID_Enc, 
+            @FullName, 
+            @Email, 
+            @Phone_Enc, 
+            @DOB, 
+            @Department, 
+            @UserID,
+            1  
+        );
+
+        -- Audit: Log the action
+        DECLARE @StudentRecordID INT = SCOPE_IDENTITY();
+        INSERT INTO AUDIT_LOG (UserID, Action, TableName, RecordID, Success)
+        VALUES (@UserID, 'ADD_STUDENT', 'STUDENT', @StudentRecordID, 1);
+
+        SET @Result = 1;
+        SET @Message = 'Student added successfully - UserID: ' + CAST(@UserID AS NVARCHAR(10));
+    END TRY
+    BEGIN CATCH
+        SET @Result = 0;
+        SET @Message = ERROR_MESSAGE();
+        
+        -- Audit: Log the failure
+        INSERT INTO AUDIT_LOG (UserID, Action, TableName, Success)
+        VALUES (ISNULL(@UserID, 0), 'ADD_STUDENT_FAILED', 'STUDENT', 0);
+    END CATCH
+END
+GO
+-- PART 4: CREATE sp_ViewOwnProfile
+CREATE PROCEDURE sp_ViewOwnProfile
+    @UserID INT,
+    @UserClearance INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    -- MLS: Check clearance (NRU - No Read Up)
+    IF @UserClearance < 1
+    BEGIN
+        SELECT 'Access Denied: Insufficient clearance' AS Message;
+        RETURN;
+    END
+    
+    -- Encryption: Open encryption key
+    OPEN SYMMETRIC KEY StudentDataKey
+    DECRYPTION BY CERTIFICATE StudentDataCert;
+    
+    -- Retrieve student profile with decrypted data
+    SELECT 
+        s.StudentID,
+        s.FullName,
+        s.Email,
+        CONVERT(NVARCHAR(20), DECRYPTBYKEY(s.Phone_Encrypted)) AS Phone,
+        s.DOB,
+        s.Department,
+        s.ClearanceLevel,
+        u.Username
+    FROM STUDENT s
+    INNER JOIN USERS u ON s.UserID = u.UserID
+    WHERE s.UserID = @UserID;
+    
+    -- Close encryption key
+    CLOSE SYMMETRIC KEY StudentDataKey;
+    
+    -- Audit: Log the action
+    INSERT INTO AUDIT_LOG (UserID, Action, TableName, Success)
+    VALUES (@UserID, 'VIEW_OWN_PROFILE', 'STUDENT', 1);
+END
+GO
+-- PART 5: CREATE sp_EditOwnProfile
+CREATE PROCEDURE sp_EditOwnProfile
+    @UserID INT,
+    @UserClearance INT,
+    @NewEmail NVARCHAR(100),
+    @NewPhone NVARCHAR(20),
+    @Result INT OUTPUT,
+    @Message NVARCHAR(200) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        -- Access Control: Check clearance
+        IF @UserClearance < 1
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Access Denied: Insufficient clearance';
+            RETURN;
+        END
+        
+        -- Check if student exists
+        IF NOT EXISTS (SELECT 1 FROM STUDENT WHERE UserID = @UserID)
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Student record not found';
+            RETURN;
+        END
+        
+        -- Encryption: Encrypt new phone
+        OPEN SYMMETRIC KEY StudentDataKey
+        DECRYPTION BY CERTIFICATE StudentDataCert;
+        
+        DECLARE @Phone_Enc VARBINARY(256);
+        SET @Phone_Enc = ENCRYPTBYKEY(KEY_GUID('StudentDataKey'), @NewPhone);
+        
+        CLOSE SYMMETRIC KEY StudentDataKey;
+        
+        -- Update student record
+        UPDATE STUDENT
+        SET Email = @NewEmail,
+            Phone_Encrypted = @Phone_Enc
+        WHERE UserID = @UserID;
+        
+        -- Audit: Log the action
+        INSERT INTO AUDIT_LOG (UserID, Action, TableName, Success)
+        VALUES (@UserID, 'EDIT_OWN_PROFILE', 'STUDENT', 1);
+        
+        SET @Result = 1;
+        SET @Message = 'Profile updated successfully';
+    END TRY
+    BEGIN CATCH
+        SET @Result = 0;
+        SET @Message = ERROR_MESSAGE();
+        
+        -- Audit log for failure
+        INSERT INTO AUDIT_LOG (UserID, Action, TableName, Success)
+        VALUES (@UserID, 'EDIT_OWN_PROFILE_FAILED', 'STUDENT', 0);
+    END CATCH
+END
+GO
+-- PART 6: CREATE sp_ViewAllStudents (Admin Only)
+CREATE PROCEDURE sp_ViewAllStudents
+    @ExecutorClearance INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    -- Access Control: Check clearance (Admin = 4)
+    IF @ExecutorClearance < 4
+    BEGIN
+        SELECT 'Access Denied: Admin privileges required' AS Message;
+        RETURN;
+    END
+    
+    -- Encryption: Open encryption key
+    OPEN SYMMETRIC KEY StudentDataKey
+    DECRYPTION BY CERTIFICATE StudentDataCert;
+    
+    -- Retrieve all students with decrypted data
+    SELECT 
+        s.StudentID,
+        s.FullName,
+        s.Email,
+        CONVERT(NVARCHAR(20), DECRYPTBYKEY(s.Phone_Encrypted)) AS Phone,
+        s.DOB,
+        s.Department,
+        u.Username,
+        u.Role,
+        s.ClearanceLevel,
+        u.IsActive,
+        u.CreatedDate,
+        u.LastLogin
+    FROM STUDENT s
+    INNER JOIN USERS u ON s.UserID = u.UserID
+    ORDER BY s.StudentID;
+    
+    -- Close encryption key
+    CLOSE SYMMETRIC KEY StudentDataKey;
+    
+    -- Audit: Log the action
+    DECLARE @AdminID INT;
+    SELECT @AdminID = UserID FROM USERS WHERE ClearanceLevel = 4;
+    
+    IF @AdminID IS NOT NULL
+    BEGIN
+        INSERT INTO AUDIT_LOG (UserID, Action, TableName, Success)
+        VALUES (@AdminID, 'VIEW_ALL_STUDENTS', 'STUDENT', 1);
+    END
+END
+GO
+
+-- =============================================
+-- STEP 12: GRADE MANAGEMENT PROCEDURES (COMPLETE & FIXED)
+-- =============================================
+--
+-- PART 1: CLEAN UP OLD PROCEDURES
+IF OBJECT_ID('sp_AddGrade', 'P') IS NOT NULL
+BEGIN
+    DROP PROCEDURE sp_AddGrade;
+   
+END
+GO
+
+IF OBJECT_ID('sp_ViewOwnGrades', 'P') IS NOT NULL
+BEGIN
+    DROP PROCEDURE sp_ViewOwnGrades;
+END
+GO
+
+IF OBJECT_ID('sp_ViewAllGrades', 'P') IS NOT NULL
+BEGIN
+    DROP PROCEDURE sp_ViewAllGrades;
+END
+GO
+
+IF OBJECT_ID('sp_UpdateGrade', 'P') IS NOT NULL
+BEGIN
+    DROP PROCEDURE sp_UpdateGrade;
+END
+GO
+
+IF OBJECT_ID('sp_DeleteGrade', 'P') IS NOT NULL
+BEGIN
+    DROP PROCEDURE sp_DeleteGrade;
+END
+GO
+-- PART 2: CREATE sp_AddGrade (Instructor Only)
+CREATE PROCEDURE sp_AddGrade
+    @StudentID INT,
+    @CourseID INT,
+    @GradeValue DECIMAL(5,2),
+    @InstructorID INT,
+    @ExecutorClearance INT,
+    @Result INT OUTPUT,
+    @Message NVARCHAR(200) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        -- Access Control: Check clearance (Instructor = 3)
+        IF @ExecutorClearance < 3
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Access Denied: Instructor privileges required';
+            RETURN;
+        END
+
+        -- Validate student exists
+        IF NOT EXISTS (SELECT 1 FROM STUDENT WHERE StudentID = @StudentID)
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Student not found';
+            RETURN;
+        END
+
+        -- Validate course exists
+        IF NOT EXISTS (SELECT 1 FROM COURSE WHERE CourseID = @CourseID)
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Course not found';
+            RETURN;
+        END
+
+        -- Validate grade value
+        IF @GradeValue < 0 OR @GradeValue > 100
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Grade value must be between 0 and 100';
+            RETURN;
+        END
+
+        -- Encryption: Convert to string FIRST, then encrypt
+        DECLARE @StudentIDStr NVARCHAR(50);
+        DECLARE @GradeValueStr NVARCHAR(10);
+        
+        SET @StudentIDStr = CAST(@StudentID AS NVARCHAR(50));
+        SET @GradeValueStr = CAST(@GradeValue AS NVARCHAR(10));
+        
+        -- Now encrypt the string variables
+        DECLARE @StudentID_Enc VARBINARY(256);
+        DECLARE @Grade_Enc VARBINARY(256);
+        
+        EXEC sp_EncryptData @StudentIDStr, @StudentID_Enc OUTPUT;
+        EXEC sp_EncryptData @GradeValueStr, @Grade_Enc OUTPUT;
+
+        -- Insert grade record
+        INSERT INTO GRADES (StudentID_Encrypted, CourseID, GradeValue_Encrypted, EnteredBy)
+        VALUES (@StudentID_Enc, @CourseID, @Grade_Enc, @InstructorID);
+
+        -- Audit: Log the action
+        DECLARE @GradeID INT;
+        SET @GradeID = SCOPE_IDENTITY();
+        
+        INSERT INTO AUDIT_LOG (UserID, Action, TableName, RecordID, Success)
+        VALUES (@InstructorID, 'INSERT_GRADE', 'GRADES', @GradeID, 1);
+
+        SET @Result = 1;
+        SET @Message = 'Grade added successfully';
+    END TRY
+    BEGIN CATCH
+        SET @Result = 0;
+        SET @Message = ERROR_MESSAGE();
+        
+        -- Audit: Log failure
+        INSERT INTO AUDIT_LOG (UserID, Action, TableName, Success)
+        VALUES (@InstructorID, 'INSERT_GRADE_FAILED', 'GRADES', 0);
+    END CATCH
+END
+GO
+-- PART 3: CREATE sp_ViewOwnGrades (Student)
+
+CREATE PROCEDURE sp_ViewOwnGrades
+    @UserID INT,
+    @UserClearance INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    -- MLS: Check clearance (NRU - No Read Up)
+    IF @UserClearance < 1
+    BEGIN
+        SELECT 'Access Denied: Insufficient clearance' AS Message;
+        RETURN;
+    END
+    
+    -- Get StudentID from UserID
+    DECLARE @StudentID INT;
+    SELECT @StudentID = StudentID FROM STUDENT WHERE UserID = @UserID;
+    
+    IF @StudentID IS NULL
+    BEGIN
+        SELECT 'Student record not found' AS Message;
+        RETURN;
+    END
+    
+    -- Encryption: Open symmetric key
+    OPEN SYMMETRIC KEY StudentDataKey
+    DECRYPTION BY CERTIFICATE StudentDataCert;
+    
+    -- Retrieve grades with decryption
+    SELECT 
+        c.CourseID,
+        c.CourseName,
+        CONVERT(DECIMAL(5,2), CONVERT(NVARCHAR(10), DECRYPTBYKEY(g.GradeValue_Encrypted))) AS Grade,
+        g.DateEntered,
+        i.FullName AS EnteredBy
+    FROM GRADES g
+    INNER JOIN COURSE c ON g.CourseID = c.CourseID
+    LEFT JOIN INSTRUCTOR i ON g.EnteredBy = i.InstructorID
+    WHERE CONVERT(NVARCHAR(50), DECRYPTBYKEY(g.StudentID_Encrypted)) = CAST(@StudentID AS NVARCHAR(50))
+    ORDER BY g.DateEntered DESC;
+    
+    -- Close symmetric key
+    CLOSE SYMMETRIC KEY StudentDataKey;
+    
+    -- Audit: Log the action
+    INSERT INTO AUDIT_LOG (UserID, Action, TableName, Success)
+    VALUES (@UserID, 'VIEW_OWN_GRADES', 'GRADES', 1);
+END
+GO
+-- PART 4: CREATE sp_ViewAllGrades (Instructor)
+CREATE PROCEDURE sp_ViewAllGrades
+    @CourseID INT,
+    @ExecutorClearance INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    -- Access Control: Check clearance (Instructor = 3)
+    IF @ExecutorClearance < 3
+    BEGIN
+        SELECT 'Access Denied: Instructor privileges required' AS Message;
+        RETURN;
+    END
+    
+    -- Validate course exists
+    IF NOT EXISTS (SELECT 1 FROM COURSE WHERE CourseID = @CourseID)
+    BEGIN
+        SELECT 'Course not found' AS Message;
+        RETURN;
+    END
+    
+    -- Encryption: Open symmetric key
+    OPEN SYMMETRIC KEY StudentDataKey
+    DECRYPTION BY CERTIFICATE StudentDataCert;
+    
+    -- Retrieve all grades for the course with decryption
+    SELECT 
+        g.GradeID,
+        s.StudentID,
+        s.FullName AS StudentName,
+        c.CourseName,
+        CONVERT(DECIMAL(5,2), CONVERT(NVARCHAR(10), DECRYPTBYKEY(g.GradeValue_Encrypted))) AS Grade,
+        g.DateEntered,
+        i.FullName AS EnteredBy
+    FROM GRADES g
+    INNER JOIN COURSE c ON g.CourseID = c.CourseID
+    INNER JOIN STUDENT s ON CONVERT(NVARCHAR(50), DECRYPTBYKEY(g.StudentID_Encrypted)) = CAST(s.StudentID AS NVARCHAR(50))
+    LEFT JOIN INSTRUCTOR i ON g.EnteredBy = i.InstructorID
+    WHERE g.CourseID = @CourseID
+    ORDER BY s.FullName;
+    
+    -- Close symmetric key
+    CLOSE SYMMETRIC KEY StudentDataKey;
+END
+GO
+-- PART 5: CREATE sp_UpdateGrade (Instructor Only)
+CREATE PROCEDURE sp_UpdateGrade
+    @GradeID INT,
+    @NewGradeValue DECIMAL(5,2),
+    @InstructorID INT,
+    @ExecutorClearance INT,
+    @Result INT OUTPUT,
+    @Message NVARCHAR(200) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        -- Access Control: Check clearance (Instructor = 3)
+        IF @ExecutorClearance < 3
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Access Denied: Instructor privileges required';
+            RETURN;
+        END
+
+        -- Validate grade exists
+        IF NOT EXISTS (SELECT 1 FROM GRADES WHERE GradeID = @GradeID)
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Grade record not found';
+            RETURN;
+        END
+
+        -- Validate grade value
+        IF @NewGradeValue < 0 OR @NewGradeValue > 100
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Grade value must be between 0 and 100';
+            RETURN;
+        END
+
+        -- Get old grade for audit
+        DECLARE @OldGrade NVARCHAR(10);
+        
+        OPEN SYMMETRIC KEY StudentDataKey DECRYPTION BY CERTIFICATE StudentDataCert;
+        
+        SELECT @OldGrade = CONVERT(NVARCHAR(10), DECRYPTBYKEY(GradeValue_Encrypted))
+        FROM GRADES WHERE GradeID = @GradeID;
+        
+        CLOSE SYMMETRIC KEY StudentDataKey;
+
+        -- Encryption: Convert to string FIRST, then encrypt
+        DECLARE @GradeValueStr NVARCHAR(10);
+        SET @GradeValueStr = CAST(@NewGradeValue AS NVARCHAR(10));
+        
+        DECLARE @Grade_Enc VARBINARY(256);
+        EXEC sp_EncryptData @GradeValueStr, @Grade_Enc OUTPUT;
+
+        -- Update grade
+        UPDATE GRADES
+        SET GradeValue_Encrypted = @Grade_Enc,
+            DateEntered = GETDATE(),
+            EnteredBy = @InstructorID
+        WHERE GradeID = @GradeID;
+
+        -- Audit: Log the update
+        INSERT INTO AUDIT_LOG (UserID, Action, TableName, RecordID, OldValue, NewValue, Success)
+        VALUES (@InstructorID, 'UPDATE_GRADE', 'GRADES', @GradeID, @OldGrade, @GradeValueStr, 1);
+
+        SET @Result = 1;
+        SET @Message = 'Grade updated successfully';
+    END TRY
+    BEGIN CATCH
+        SET @Result = 0;
+        SET @Message = ERROR_MESSAGE();
+    END CATCH
+END
+GO
+-- PART 6: CREATE sp_DeleteGrade (Admin Only)
+CREATE PROCEDURE sp_DeleteGrade
+    @GradeID INT,
+    @ExecutorClearance INT,
+    @Result INT OUTPUT,
+    @Message NVARCHAR(200) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        -- Access Control: Check clearance (Admin = 4)
+        IF @ExecutorClearance < 4
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Access Denied: Admin privileges required';
+            RETURN;
+        END
+
+        -- Validate grade exists
+        IF NOT EXISTS (SELECT 1 FROM GRADES WHERE GradeID = @GradeID)
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Grade record not found';
+            RETURN;
+        END
+
+        -- Delete grade
+        DELETE FROM GRADES WHERE GradeID = @GradeID;
+
+        -- Audit: Log the deletion
+        INSERT INTO AUDIT_LOG (UserID, Action, TableName, RecordID, Success)
+        VALUES (0, 'DELETE_GRADE', 'GRADES', @GradeID, 1);
+
+        SET @Result = 1;
+        SET @Message = 'Grade deleted successfully';
+    END TRY
+    BEGIN CATCH
+        SET @Result = 0;
+        SET @Message = ERROR_MESSAGE();
+    END CATCH
+END
+GO
+
+
+-- =============================================
+-- STEP 13: ATTENDANCE MANAGEMENT
+-- =============================================
+
+CREATE PROCEDURE sp_MarkAttendance
+    @StudentID INT,
+    @CourseID INT,
+    @Status BIT,
+    @RecordedBy INT,
+    @ExecutorClearance INT,
+    @Result INT OUTPUT,
+    @Message NVARCHAR(200) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        IF @ExecutorClearance < 2
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Access Denied: TA privileges required';
+            RETURN;
+        END
+
+        INSERT INTO ATTENDANCE (StudentID, CourseID, Status, RecordedBy)
+        VALUES (@StudentID, @CourseID, @Status, @RecordedBy);
+
+        SET @Result = 1;
+        SET @Message = 'Attendance marked successfully';
+    END TRY
+    BEGIN CATCH
+        SET @Result = 0;
+        SET @Message = ERROR_MESSAGE();
+    END CATCH
+END
+GO
+
+CREATE PROCEDURE sp_ViewOwnAttendance
+    @UserID INT,
+    @UserClearance INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    IF @UserClearance < 1
+    BEGIN
+        SELECT 'Access Denied: Insufficient clearance' AS Message;
+        RETURN;
+    END
+    
+    DECLARE @StudentID INT;
+    SELECT @StudentID = StudentID FROM STUDENT WHERE UserID = @UserID;
+    
+    SELECT c.CourseName, a.Status AS Present, a.DateRecorded
+    FROM ATTENDANCE a
+    INNER JOIN COURSE c ON a.CourseID = c.CourseID
+    WHERE a.StudentID = @StudentID
+    ORDER BY a.DateRecorded DESC;
+END
+GO
+
+-- =============================================
+-- STEP 14: COURSE MANAGEMENT
+-- =============================================
+
+CREATE PROCEDURE sp_ViewPublicCourses
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT CourseID, CourseName, PublicInfo
+    FROM COURSE
+    WHERE ClassificationLevel = 0;
+END
+GO
+
+CREATE PROCEDURE sp_AddCourse
+    @CourseName NVARCHAR(100),
+    @Description NVARCHAR(MAX),
+    @PublicInfo NVARCHAR(MAX),
+    @InstructorID INT,
+    @ExecutorClearance INT,
+    @Result INT OUTPUT,
+    @Message NVARCHAR(200) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        IF @ExecutorClearance < 4
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Access Denied: Admin privileges required';
+            RETURN;
+        END
+
+        INSERT INTO COURSE (CourseName, Description, PublicInfo, InstructorID)
+        VALUES (@CourseName, @Description, @PublicInfo, @InstructorID);
+
+        SET @Result = 1;
+        SET @Message = 'Course added successfully';
+    END TRY
+    BEGIN CATCH
+        SET @Result = 0;
+        SET @Message = ERROR_MESSAGE();
+    END CATCH
+END
+GO
+
+-- =============================================
+-- STEP 15: SAMPLE DATA INSERTION
+-- =============================================
+
+DECLARE @UserID INT, @Result INT, @Message NVARCHAR(200);
+
+EXEC sp_RegisterUser 'admin', 'Admin@123', 'Admin', 4, @UserID OUTPUT, @Result OUTPUT, @Message OUTPUT;
+PRINT 'Admin: ' + @Message;
+
+EXEC sp_RegisterUser 'dr_smith', 'Instructor@123', 'Instructor', 3, @UserID OUTPUT, @Result OUTPUT, @Message OUTPUT;
+PRINT 'Instructor: ' + @Message;
+
+EXEC sp_RegisterUser 'ta_john', 'TA@123', 'TA', 2, @UserID OUTPUT, @Result OUTPUT, @Message OUTPUT;
+PRINT 'TA: ' + @Message;
+
+EXEC sp_RegisterUser 'student1', 'Student@123', 'Student', 1, @UserID OUTPUT, @Result OUTPUT, @Message OUTPUT;
+PRINT 'Student1: ' + @Message;
+
+EXEC sp_RegisterUser 'student2', 'Student@123', 'Student', 1, @UserID OUTPUT, @Result OUTPUT, @Message OUTPUT;
+PRINT 'Student2: ' + @Message;
+
+EXEC sp_RegisterUser 'guest', 'Guest@123', 'Guest', 0, @UserID OUTPUT, @Result OUTPUT, @Message OUTPUT;
+PRINT 'Guest: ' + @Message;
+
+--Instructor table Insertion--
+
+INSERT INTO INSTRUCTOR (FullName, Email, ClearanceLevel, UserID)
+SELECT 'Dr. John Smith', 'dr.smith@university.edu', 3, UserID
+FROM USERS WHERE Username = 'dr_smith';
+
+
+INSERT INTO COURSE (CourseName, Description, PublicInfo, InstructorID)
+VALUES 
+('Database Security', 'Advanced database security concepts', 'Learn database security fundamentals', 1),
+('Network Security', 'Network security and cryptography', 'Explore network security protocols', 1),
+('Web Security', 'Web application security', 'Secure web development practices', 1);
+
+-- =============================================
+-- STEP 16: TEST QUERIES
+-- =============================================
+
+DECLARE @UserID INT, @Role NVARCHAR(20), @ClearanceLevel INT, @Success BIT, @Message NVARCHAR(200);
+EXEC sp_Login 'admin', 'Admin@123', @UserID OUTPUT, @Role OUTPUT, @ClearanceLevel OUTPUT, @Success OUTPUT, @Message OUTPUT;
+PRINT 'Login Result: ' + @Message;
+PRINT 'UserID: ' + CAST(@UserID AS NVARCHAR(10)) + ', Role: ' + @Role + ', Clearance: ' + CAST(@ClearanceLevel AS NVARCHAR(10));
+GO
+
+EXEC sp_ViewPublicCourses;
+GO
+
+DECLARE @Result INT, @Message NVARCHAR(200);
+EXEC sp_AddStudent 
+    @FullName = 'Alice Johnson',
+    @Email = 'alice.johnson@university.edu',
+    @Phone = '555-1234',
+    @DOB = '2002-05-15',
+    @Department = 'Computer Science',
+    @Username = 'alice_j',
+    @Password = 'Alice@123',
+    @ExecutorClearance = 4,
+    @Result = @Result OUTPUT,
+    @Message = @Message OUTPUT;
+
+	---------------PART B ----------------------------------
+
+	-- =============================================
+-- STEP 1: CREATE ROLE REQUESTS TABLE
+-- =============================================
+
+-- Drop table if exists
+IF OBJECT_ID('ROLE_REQUESTS', 'U') IS NOT NULL
+BEGIN
+    DROP TABLE ROLE_REQUESTS;
+END
+GO
+
+CREATE TABLE ROLE_REQUESTS (
+    RequestID INT IDENTITY(1,1) PRIMARY KEY,
+    UserID INT NOT NULL,
+    CurrentRole NVARCHAR(20) NOT NULL,
+    RequestedRole NVARCHAR(20) NOT NULL CHECK (RequestedRole IN ('TA', 'Instructor', 'Admin')),
+    Reason NVARCHAR(500) NOT NULL,
+    Comments NVARCHAR(MAX) NULL,
+    Status NVARCHAR(20) NOT NULL DEFAULT 'Pending' CHECK (Status IN ('Pending', 'Approved', 'Denied')),
+    RequestDate DATETIME DEFAULT GETDATE(),
+    ReviewedBy INT NULL,
+    ReviewDate DATETIME NULL,
+    ReviewComments NVARCHAR(MAX) NULL,
+    FOREIGN KEY (UserID) REFERENCES USERS(UserID),
+    FOREIGN KEY (ReviewedBy) REFERENCES USERS(UserID)
+);
+GO
+-- Create index for better performance
+CREATE INDEX IX_RoleRequests_Status ON ROLE_REQUESTS(Status);
+CREATE INDEX IX_RoleRequests_UserID ON ROLE_REQUESTS(UserID);
+GO
+-- =============================================
+-- STEP 2: CREATE sp_SubmitRoleRequest
+-- =============================================
+-- Drop procedure if exists
+IF OBJECT_ID('sp_SubmitRoleRequest', 'P') IS NOT NULL
+    DROP PROCEDURE sp_SubmitRoleRequest;
+GO
+
+CREATE PROCEDURE sp_SubmitRoleRequest
+    @UserID INT,
+    @RequestedRole NVARCHAR(20),
+    @Reason NVARCHAR(500),
+    @Comments NVARCHAR(MAX) = NULL,
+    @Result INT OUTPUT,
+    @Message NVARCHAR(200) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        -- Validate user exists
+        IF NOT EXISTS (SELECT 1 FROM USERS WHERE UserID = @UserID)
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'User not found';
+            RETURN;
+        END
+
+        -- Get current user role
+        DECLARE @CurrentRole NVARCHAR(20);
+        DECLARE @CurrentClearance INT;
+        
+        SELECT @CurrentRole = Role, @CurrentClearance = ClearanceLevel
+        FROM USERS WHERE UserID = @UserID;
+
+        -- Validate requested role
+        IF @RequestedRole NOT IN ('TA', 'Instructor', 'Admin')
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Invalid role requested. Must be TA, Instructor, or Admin';
+            RETURN;
+        END
+
+        -- Prevent downgrade requests
+        DECLARE @RequestedClearance INT;
+        SET @RequestedClearance = CASE @RequestedRole
+            WHEN 'TA' THEN 2
+            WHEN 'Instructor' THEN 3
+            WHEN 'Admin' THEN 4
+            ELSE 0
+        END;
+
+        IF @RequestedClearance <= @CurrentClearance
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Cannot request same or lower role. Current: ' + @CurrentRole;
+            RETURN;
+        END
+
+        -- Check if user already has a pending request
+        IF EXISTS (SELECT 1 FROM ROLE_REQUESTS 
+                   WHERE UserID = @UserID 
+                   AND Status = 'Pending')
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'You already have a pending role request';
+            RETURN;
+        END
+
+        -- Validate reason is not empty
+        IF LEN(LTRIM(RTRIM(@Reason))) = 0
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Reason for role upgrade is required';
+            RETURN;
+        END
+
+        -- Insert role request
+        INSERT INTO ROLE_REQUESTS (
+            UserID,
+            CurrentRole,
+            RequestedRole,
+            Reason,
+            Comments,
+            Status
+        )
+        VALUES (
+            @UserID,
+            @CurrentRole,
+            @RequestedRole,
+            @Reason,
+            @Comments,
+            'Pending'
+        );
+
+        DECLARE @RequestID INT = SCOPE_IDENTITY();
+
+        -- Audit: Log the request
+        INSERT INTO AUDIT_LOG (UserID, Action, TableName, RecordID, Success)
+        VALUES (@UserID, 'SUBMIT_ROLE_REQUEST', 'ROLE_REQUESTS', @RequestID, 1);
+
+        SET @Result = 1;
+        SET @Message = 'Role request submitted successfully. Request ID: ' + CAST(@RequestID AS NVARCHAR(10));
+    END TRY
+    BEGIN CATCH
+        SET @Result = 0;
+        SET @Message = ERROR_MESSAGE();
+        
+        -- Audit: Log failure
+        INSERT INTO AUDIT_LOG (UserID, Action, TableName, Success)
+        VALUES (@UserID, 'SUBMIT_ROLE_REQUEST_FAILED', 'ROLE_REQUESTS', 0);
+    END CATCH
+END
+GO
+
+
+-- =============================================
+-- STEP 3: CREATE sp_ViewMyRoleRequests
+-- Users can view their own role requests
+-- =============================================
+IF OBJECT_ID('sp_ViewMyRoleRequests', 'P') IS NOT NULL
+    DROP PROCEDURE sp_ViewMyRoleRequests;
+GO
+
+CREATE PROCEDURE sp_ViewMyRoleRequests
+    @UserID INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    -- Validate user exists
+    IF NOT EXISTS (SELECT 1 FROM USERS WHERE UserID = @UserID)
+    BEGIN
+        SELECT 'User not found' AS Message;
+        RETURN;
+    END
+
+    -- Retrieve all role requests for the user
+    SELECT 
+        rr.RequestID,
+        rr.CurrentRole,
+        rr.RequestedRole,
+        rr.Reason,
+        rr.Comments,
+        rr.Status,
+        rr.RequestDate,
+        rr.ReviewDate,
+        rr.ReviewComments,
+        u.Username AS ReviewedByUsername
+    FROM ROLE_REQUESTS rr
+    LEFT JOIN USERS u ON rr.ReviewedBy = u.UserID
+    WHERE rr.UserID = @UserID
+    ORDER BY rr.RequestDate DESC;
+    
+    -- Audit: Log the action
+    INSERT INTO AUDIT_LOG (UserID, Action, TableName, Success)
+    VALUES (@UserID, 'VIEW_MY_ROLE_REQUESTS', 'ROLE_REQUESTS', 1);
+END
+GO
+-- =============================================
+-- STEP 4: CREATE sp_ViewPendingRoleRequests 
+-- Admin can view all pending role requests
+-- =============================================
+
+IF OBJECT_ID('sp_ViewPendingRoleRequests', 'P') IS NOT NULL
+    DROP PROCEDURE sp_ViewPendingRoleRequests;
+GO
+
+-- Drop old version
+DROP PROCEDURE IF EXISTS sp_ViewPendingRoleRequests;
+GO
+
+CREATE PROCEDURE sp_ViewPendingRoleRequests
+    @AdminClearance INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    -- Access Control: Check clearance (Admin = 4)
+    IF @AdminClearance < 4
+    BEGIN
+        SELECT 'Access Denied: Admin privileges required' AS Message;
+        RETURN;
+    END
+    
+    -- Retrieve all pending role requests
+    SELECT 
+        rr.RequestID,
+        u.UserID,
+        u.Username,
+        rr.CurrentRole,
+        rr.RequestedRole,
+        rr.Reason,
+        rr.Comments,
+        rr.Status,
+        rr.RequestDate,
+        DATEDIFF(DAY, rr.RequestDate, GETDATE()) AS DaysPending,
+        s.Email AS StudentEmail,
+        s.FullName AS ApplicantName
+    FROM ROLE_REQUESTS rr
+    INNER JOIN USERS u ON rr.UserID = u.UserID
+    LEFT JOIN STUDENT s ON u.UserID = s.UserID  -- Get email from STUDENT table
+    WHERE rr.Status = 'Pending'
+    ORDER BY rr.RequestDate ASC;
+    
+    -- Show count of pending requests
+    DECLARE @PendingCount INT;
+    SELECT @PendingCount = COUNT(*) FROM ROLE_REQUESTS WHERE Status = 'Pending';
+    
+    PRINT 'Total Pending Requests: ' + CAST(@PendingCount AS NVARCHAR(10));
+END
+GO
+-- Test it
+EXEC sp_ViewPendingRoleRequests @AdminClearance = 4;
+GO
+- =============================================
+-- STEP 5: CREATE sp_ApproveRoleRequest
+-- Admin can approve role requests
+-- =============================================
+IF OBJECT_ID('sp_ApproveRoleRequest', 'P') IS NOT NULL
+    DROP PROCEDURE sp_ApproveRoleRequest;
+GO
+
+CREATE PROCEDURE sp_ApproveRoleRequest
+    @RequestID INT,
+    @AdminUserID INT,
+    @AdminClearance INT,
+    @ReviewComments NVARCHAR(MAX) = NULL,
+    @Result INT OUTPUT,
+    @Message NVARCHAR(200) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        -- Access Control: Check clearance (Admin = 4)
+        IF @AdminClearance < 4
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Access Denied: Admin privileges required';
+            RETURN;
+        END
+
+        -- Validate request exists
+        IF NOT EXISTS (SELECT 1 FROM ROLE_REQUESTS WHERE RequestID = @RequestID)
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Role request not found';
+            RETURN;
+        END
+
+        -- Get request details
+        DECLARE @UserID INT;
+        DECLARE @RequestedRole NVARCHAR(20);
+        DECLARE @CurrentStatus NVARCHAR(20);
+        DECLARE @RequestedClearance INT;
+        
+        SELECT 
+            @UserID = UserID,
+            @RequestedRole = RequestedRole,
+            @CurrentStatus = Status
+        FROM ROLE_REQUESTS
+        WHERE RequestID = @RequestID;
+
+        -- Check if request is pending
+        IF @CurrentStatus != 'Pending'
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Request already processed. Current status: ' + @CurrentStatus;
+            RETURN;
+        END
+
+        -- Calculate new clearance level
+        SET @RequestedClearance = CASE @RequestedRole
+            WHEN 'TA' THEN 2
+            WHEN 'Instructor' THEN 3
+            WHEN 'Admin' THEN 4
+            ELSE 1
+        END;
+
+        -- Update request status
+        UPDATE ROLE_REQUESTS
+        SET Status = 'Approved',
+            ReviewedBy = @AdminUserID,
+            ReviewDate = GETDATE(),
+            ReviewComments = @ReviewComments
+        WHERE RequestID = @RequestID;
+
+        -- Update user's role and clearance
+        UPDATE USERS
+        SET Role = @RequestedRole,
+            ClearanceLevel = @RequestedClearance
+        WHERE UserID = @UserID;
+
+        -- If upgrading to Instructor, create instructor record
+        IF @RequestedRole = 'Instructor' AND NOT EXISTS (SELECT 1 FROM INSTRUCTOR WHERE UserID = @UserID)
+        BEGIN
+            DECLARE @FullName NVARCHAR(100), @Email NVARCHAR(100);
+            
+            SELECT @FullName = s.FullName, @Email = s.Email
+            FROM STUDENT s
+            WHERE s.UserID = @UserID;
+            
+            IF @FullName IS NOT NULL
+            BEGIN
+                INSERT INTO INSTRUCTOR (FullName, Email, ClearanceLevel, UserID)
+                VALUES (@FullName, @Email, 3, @UserID);
+            END
+        END
+
+        -- Audit: Log the approval
+        INSERT INTO AUDIT_LOG (UserID, Action, TableName, RecordID, OldValue, NewValue, Success)
+        VALUES (@AdminUserID, 'APPROVE_ROLE_REQUEST', 'ROLE_REQUESTS', @RequestID, 
+                'Pending', 'Approved', 1);
+
+        SET @Result = 1;
+        SET @Message = 'Role request approved. User upgraded to ' + @RequestedRole;
+    END TRY
+    BEGIN CATCH
+        SET @Result = 0;
+        SET @Message = ERROR_MESSAGE();
+        
+        -- Audit: Log failure
+        INSERT INTO AUDIT_LOG (UserID, Action, TableName, RecordID, Success)
+        VALUES (@AdminUserID, 'APPROVE_ROLE_REQUEST_FAILED', 'ROLE_REQUESTS', @RequestID, 0);
+    END CATCH
+END
+GO
+-- =============================================
+-- STEP 6: CREATE sp_DenyRoleRequest
+-- Admin can deny role requests
+-- =============================================
+IF OBJECT_ID('sp_DenyRoleRequest', 'P') IS NOT NULL
+    DROP PROCEDURE sp_DenyRoleRequest;
+GO
+
+CREATE PROCEDURE sp_DenyRoleRequest
+    @RequestID INT,
+    @AdminUserID INT,
+    @AdminClearance INT,
+    @ReviewComments NVARCHAR(MAX),
+    @Result INT OUTPUT,
+    @Message NVARCHAR(200) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        -- Access Control: Check clearance (Admin = 4)
+        IF @AdminClearance < 4
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Access Denied: Admin privileges required';
+            RETURN;
+        END
+
+        -- Validate request exists
+        IF NOT EXISTS (SELECT 1 FROM ROLE_REQUESTS WHERE RequestID = @RequestID)
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Role request not found';
+            RETURN;
+        END
+
+        -- Get request details
+        DECLARE @CurrentStatus NVARCHAR(20);
+        DECLARE @UserID INT;
+        
+        SELECT 
+            @CurrentStatus = Status,
+            @UserID = UserID
+        FROM ROLE_REQUESTS
+        WHERE RequestID = @RequestID;
+
+        -- Check if request is pending
+        IF @CurrentStatus != 'Pending'
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Request already processed. Current status: ' + @CurrentStatus;
+            RETURN;
+        END
+
+        -- Require review comments for denial
+        IF @ReviewComments IS NULL OR LEN(LTRIM(RTRIM(@ReviewComments))) = 0
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Review comments are required when denying a request';
+            RETURN;
+        END
+
+        -- Update request status
+        UPDATE ROLE_REQUESTS
+        SET Status = 'Denied',
+            ReviewedBy = @AdminUserID,
+            ReviewDate = GETDATE(),
+            ReviewComments = @ReviewComments
+        WHERE RequestID = @RequestID;
+
+        -- Audit: Log the denial
+        INSERT INTO AUDIT_LOG (UserID, Action, TableName, RecordID, OldValue, NewValue, Success)
+        VALUES (@AdminUserID, 'DENY_ROLE_REQUEST', 'ROLE_REQUESTS', @RequestID, 
+                'Pending', 'Denied', 1);
+
+        SET @Result = 1;
+        SET @Message = 'Role request denied successfully';
+    END TRY
+    BEGIN CATCH
+        SET @Result = 0;
+        SET @Message = ERROR_MESSAGE();
+        
+        -- Audit: Log failure
+        INSERT INTO AUDIT_LOG (UserID, Action, TableName, RecordID, Success)
+        VALUES (@AdminUserID, 'DENY_ROLE_REQUEST_FAILED', 'ROLE_REQUESTS', @RequestID, 0);
+    END CATCH
+END
+GO
+-- =============================================
+-- STEP 7: CREATE sp_ViewAllRoleRequests
+-- =============================================
+IF OBJECT_ID('sp_ViewAllRoleRequests', 'P') IS NOT NULL
+    DROP PROCEDURE sp_ViewAllRoleRequests;
+GO
+
+DROP PROCEDURE IF EXISTS sp_ViewPendingRoleRequests;
+GO
+
+CREATE PROCEDURE sp_ViewPendingRoleRequests
+    @AdminClearance INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    IF @AdminClearance < 4
+    BEGIN
+        SELECT 'Access Denied: Admin privileges required' AS Message;
+        RETURN;
+    END
+    
+    SELECT 
+        rr.RequestID,
+        u.UserID,
+        u.Username,
+        rr.CurrentRole,
+        rr.RequestedRole,
+        rr.Reason,
+        rr.Comments,
+        rr.Status,
+        rr.RequestDate,
+        DATEDIFF(DAY, rr.RequestDate, GETDATE()) AS DaysPending,
+        s.Email AS ApplicantEmail,
+        s.FullName AS ApplicantName
+    FROM ROLE_REQUESTS rr
+    INNER JOIN USERS u ON rr.UserID = u.UserID
+    LEFT JOIN STUDENT s ON u.UserID = s.UserID
+    WHERE rr.Status = 'Pending'
+    ORDER BY rr.RequestDate ASC;
+    
+    DECLARE @PendingCount INT;
+    SELECT @PendingCount = COUNT(*) FROM ROLE_REQUESTS WHERE Status = 'Pending';
+    PRINT 'Total Pending Requests: ' + CAST(@PendingCount AS NVARCHAR(10));
+END
+GO
+
+
+DROP PROCEDURE IF EXISTS sp_ViewAllRoleRequests;
+GO
+
+CREATE PROCEDURE sp_ViewAllRoleRequests
+    @AdminClearance INT,
+    @FilterStatus NVARCHAR(20) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    IF @AdminClearance < 4
+    BEGIN
+        SELECT 'Access Denied: Admin privileges required' AS Message;
+        RETURN;
+    END
+    
+    SELECT 
+        rr.RequestID,
+        u.UserID,
+        u.Username,
+        s.Email AS ApplicantEmail,
+        s.FullName AS ApplicantName,
+        rr.CurrentRole,
+        rr.RequestedRole,
+        rr.Reason,
+        rr.Comments,
+        rr.Status,
+        rr.RequestDate,
+        rr.ReviewDate,
+        rr.ReviewComments,
+        reviewer.Username AS ReviewedByUsername,
+        DATEDIFF(DAY, rr.RequestDate, ISNULL(rr.ReviewDate, GETDATE())) AS ProcessingDays
+    FROM ROLE_REQUESTS rr
+    INNER JOIN USERS u ON rr.UserID = u.UserID
+    LEFT JOIN STUDENT s ON u.UserID = s.UserID
+    LEFT JOIN USERS reviewer ON rr.ReviewedBy = reviewer.UserID
+    WHERE (@FilterStatus IS NULL OR rr.Status = @FilterStatus)
+    ORDER BY 
+        CASE rr.Status 
+            WHEN 'Pending' THEN 1 
+            WHEN 'Approved' THEN 2 
+            WHEN 'Denied' THEN 3 
+        END,
+        rr.RequestDate DESC;
+    
+    PRINT 'Request Statistics:';
+    SELECT 
+        Status,
+        COUNT(*) AS Count,
+        AVG(DATEDIFF(DAY, RequestDate, ISNULL(ReviewDate, GETDATE()))) AS AvgProcessingDays
+    FROM ROLE_REQUESTS
+    GROUP BY Status;
+END
+GO
+
+-- =============================================
+-- STEP 8: CREATE sp_CancelRoleRequest
+-- Users can cancel their own pending requests
+-- =============================================
+IF OBJECT_ID('sp_CancelRoleRequest', 'P') IS NOT NULL
+    DROP PROCEDURE sp_CancelRoleRequest;
+GO
+
+CREATE PROCEDURE sp_CancelRoleRequest
+    @RequestID INT,
+    @UserID INT,
+    @Result INT OUTPUT,
+    @Message NVARCHAR(200) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        -- Validate request exists and belongs to user
+        IF NOT EXISTS (SELECT 1 FROM ROLE_REQUESTS 
+                       WHERE RequestID = @RequestID AND UserID = @UserID)
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Role request not found or does not belong to you';
+            RETURN;
+        END
+
+        -- Check if request is pending
+        DECLARE @CurrentStatus NVARCHAR(20);
+        SELECT @CurrentStatus = Status FROM ROLE_REQUESTS WHERE RequestID = @RequestID;
+
+        IF @CurrentStatus != 'Pending'
+        BEGIN
+            SET @Result = 0;
+            SET @Message = 'Cannot cancel request. Current status: ' + @CurrentStatus;
+            RETURN;
+        END
+
+        -- Delete the request
+        DELETE FROM ROLE_REQUESTS WHERE RequestID = @RequestID;
+
+        -- Audit: Log the cancellation
+        INSERT INTO AUDIT_LOG (UserID, Action, TableName, RecordID, Success)
+        VALUES (@UserID, 'CANCEL_ROLE_REQUEST', 'ROLE_REQUESTS', @RequestID, 1);
+
+        SET @Result = 1;
+        SET @Message = 'Role request cancelled successfully';
+    END TRY
+    BEGIN CATCH
+        SET @Result = 0;
+        SET @Message = ERROR_MESSAGE();
+    END CATCH
+END
+GO
+-- =============================================
+-- STEP 9: TEST PART B PROCEDURES
+-- =============================================
+
+
+
+-- Test 1: Student submits role request to become TA
+
+DECLARE @Result INT, @Message NVARCHAR(200);
+DECLARE @TestUserID INT;
+
+SELECT @TestUserID = UserID FROM USERS WHERE Username = 'student1';
+
+IF @TestUserID IS NOT NULL
+BEGIN
+    EXEC sp_SubmitRoleRequest
+        @UserID = @TestUserID,
+        @RequestedRole = 'TA',
+        @Reason = 'I have excellent grades and want to help other students learn database security',
+        @Comments = 'Available 10 hours per week',
+        @Result = @Result OUTPUT,
+        @Message = @Message OUTPUT;
+    
+    PRINT 'Result: ' + CAST(@Result AS NVARCHAR(10));
+    PRINT 'Message: ' + @Message;
+END
+GO
+
+-- Test 2: Student tries to submit duplicate request (Should Fail)
+
+DECLARE @Result INT, @Message NVARCHAR(200);
+DECLARE @TestUserID INT;
+
+SELECT @TestUserID = UserID FROM USERS WHERE Username = 'student1';
+
+IF @TestUserID IS NOT NULL
+BEGIN
+    EXEC sp_SubmitRoleRequest
+        @UserID = @TestUserID,
+        @RequestedRole = 'Instructor',
+        @Reason = 'Another request',
+        @Result = @Result OUTPUT,
+        @Message = @Message OUTPUT;
+    
+    PRINT 'Result: ' + CAST(@Result AS NVARCHAR(10));
+    PRINT 'Message: ' + @Message;
+END
+GO
+
+-- Test 3: View my role requests
+DECLARE @TestUserID INT;
+SELECT @TestUserID = UserID FROM USERS WHERE Username = 'student1';
+
+IF @TestUserID IS NOT NULL
+    EXEC sp_ViewMyRoleRequests @UserID = @TestUserID;
+GO
+
+-- Test 4: Admin views pending requests
+PRINT '';
+PRINT '===== TEST 4: View Pending Requests (Admin) =====';
+EXEC sp_ViewPendingRoleRequests @AdminClearance = 4;
+GO
+
+-- Test 5: Admin approves request
+
+DECLARE @Result INT, @Message NVARCHAR(200);
+DECLARE @AdminUserID INT, @TestRequestID INT;
+
+SELECT @AdminUserID = UserID FROM USERS WHERE Username = 'admin';
+SELECT TOP 1 @TestRequestID = RequestID FROM ROLE_REQUESTS WHERE Status = 'Pending' ORDER BY RequestID;
+
+IF @TestRequestID IS NOT NULL AND @AdminUserID IS NOT NULL
+BEGIN
+    EXEC sp_ApproveRoleRequest
+        @RequestID = @TestRequestID,
+        @AdminUserID = @AdminUserID,
+        @AdminClearance = 4,
+        @ReviewComments = 'Excellent academic performance and strong communication skills. Approved for TA position.',
+        @Result = @Result OUTPUT,
+        @Message = @Message OUTPUT;
+    
+    PRINT 'Result: ' + CAST(@Result AS NVARCHAR(10));
+    PRINT 'Message: ' + @Message;
+    
+    -- Verify user role was updated
+    PRINT '';
+    PRINT 'Verifying role update:';
+    SELECT UserID, Username, Role, ClearanceLevel 
+    FROM USERS 
+    WHERE UserID = (SELECT UserID FROM ROLE_REQUESTS WHERE RequestID = @TestRequestID);
+END
+GO
+
+-- Test 6: Create another request and deny it
+
+DECLARE @Result INT, @Message NVARCHAR(200);
+DECLARE @TestUserID INT, @AdminUserID INT, @TestRequestID INT;
+
+SELECT @TestUserID = UserID FROM USERS WHERE Username = 'student2';
+SELECT @AdminUserID = UserID FROM USERS WHERE Username = 'admin';
+
+IF @TestUserID IS NOT NULL
+BEGIN
+    -- Submit request
+    EXEC sp_SubmitRoleRequest
+        @UserID = @TestUserID,
+        @RequestedRole = 'Instructor',
+        @Reason = 'I want to become an instructor',
+        @Comments = 'Have teaching experience',
+        @Result = @Result OUTPUT,
+        @Message = @Message OUTPUT;
+    
+    PRINT 'Submit Result: ' + @Message;
+    
+    -- Get the request ID
+    SELECT @TestRequestID = RequestID FROM ROLE_REQUESTS 
+    WHERE UserID = @TestUserID AND Status = 'Pending';
+    
+    -- Deny it
+    IF @TestRequestID IS NOT NULL
+    BEGIN
+        EXEC sp_DenyRoleRequest
+            @RequestID = @TestRequestID,
+            @AdminUserID = @AdminUserID,
+            @AdminClearance = 4,
+            @ReviewComments = 'Insufficient experience for instructor role. Consider applying for TA position first.',
+            @Result = @Result OUTPUT,
+            @Message = @Message OUTPUT;
+        
+        PRINT 'Deny Result: ' + @Message;
+    END
+END
+GO
+
+-- Test 7: View all role requests
+EXEC sp_ViewAllRoleRequests @AdminClearance = 4, @FilterStatus = NULL;
+GO
+
